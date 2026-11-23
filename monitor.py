@@ -10,22 +10,23 @@ URL = "https://dmitstock.com/region/lax/"
 KEY = os.environ["SERVERCHAN_SENDKEY"]
 STATE_FILE = Path("state.json")
 
+
 def get_stock():
     headers = {
         "User-Agent": "Mozilla/5.0 (compatible; DMITStockMonitor/1.0)"
     }
-response = requests.get(URL, headers=headers, timeout=25)
 
-if response.status_code == 403:
-    print("监控暂停：DMITStock 拒绝了 GitHub Actions 的访问。")
-    print("没有获取到库存数据，本次不更新历史库存。")
-    return None
+    response = requests.get(URL, headers=headers, timeout=25)
 
-response.raise_for_status()
+    if response.status_code == 403:
+        print("监控暂停：DMITStock 拒绝了 GitHub Actions 的访问。")
+        print("没有获取到库存数据，本次不更新历史库存。")
+        return None
+
+    response.raise_for_status()
 
     soup = BeautifulSoup(response.text, "html.parser")
     rows = soup.find_all(["tr", "article", "li"])
-
     results = {}
 
     for row in rows:
@@ -38,21 +39,21 @@ response.raise_for_status()
         if not ("lax" in low or "los angeles" in low):
             continue
 
-        # 只处理明确标注年付的套餐
         if not any(x in low for x in [
             "annually", "annual", "yearly", "年付"
         ]):
             continue
 
         prices = re.findall(r"\$\s*(\d+(?:\.\d+)?)", text)
+
         if not prices:
             continue
 
         price = float(prices[0])
+
         if price > 50:
             continue
 
-        # 必须有明确库存状态，不猜测
         sold_out = any(x in low for x in [
             "无货", "缺货", "sold out", "out of stock"
         ])
@@ -65,66 +66,83 @@ response.raise_for_status()
             continue
 
         name = text[:180]
+
         results[name] = {
             "price": price,
             "available": available
         }
 
-    if not results:
-        raise RuntimeError(
-            "没有找到可识别的套餐库存信息，可能页面结构变化或访问受限。"
-        )
-
     return results
 
 
-def send_wechat(title, content):
+def load_state():
+    if STATE_FILE.exists():
+        try:
+            return json.loads(STATE_FILE.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            return {}
+
+    return {}
+
+
+def save_state(data):
+    STATE_FILE.write_text(
+        json.dumps(data, ensure_ascii=False, indent=2),
+        encoding="utf-8"
+    )
+
+
+def send_message(title, content):
+    url = f"https://sctapi.ftqq.com/{KEY}.send"
+
     response = requests.post(
-        f"https://sctapi.ftqq.com/{KEY}.send",
-        data={"title": title, "desp": content},
+        url,
+        data={
+            "title": title,
+            "desp": content
+        },
         timeout=20
     )
-    response.raise_for_status()
-    result = response.json()
 
-    if result.get("code") != 0:
-        raise RuntimeError("Server酱推送失败：" + str(result))
+    response.raise_for_status()
+    print("Server酱通知已发送。")
 
 
 def main():
     current = get_stock()
 
-if current is None:
-    return
+    if current is None:
+        return
 
-    old = {}
-    if STATE_FILE.exists():
-        old = json.loads(STATE_FILE.read_text(encoding="utf-8"))
+    previous = load_state()
 
-    alerts = []
+    if not previous:
+        save_state(current)
+        print("首次运行：已保存当前库存，不发送通知。")
+        return
+
+    messages = []
 
     for name, item in current.items():
-        was_available = old.get(name, {}).get("available", False)
+        old = previous.get(name)
 
-        if item["available"] and not was_available:
-            alerts.append(
-                f"套餐：{name}\n价格：${item['price']}/年"
-            )
+        if old is None:
+            if item["available"]:
+                messages.append(f"发现新套餐：{name}")
+            continue
 
-    if alerts:
-        send_wechat(
-            "DMIT洛杉矶VPS补货提醒",
-            "\n\n".join(alerts) +
-            "\n\n请尽快前往DMIT官网核实库存和购买价格。"
+        if not old.get("available") and item["available"]:
+            messages.append(f"套餐补货：{name}")
+
+    if messages:
+        send_message(
+            "DMIT LAX 年付套餐库存提醒",
+            "\n\n".join(messages)
         )
+    else:
+        print("没有发现新的补货。")
 
-    STATE_FILE.write_text(
-        json.dumps(current, ensure_ascii=False, indent=2),
-        encoding="utf-8"
-    )
-
-    print("扫描完成，识别套餐：", len(current))
-    print("新发现有货套餐：", len(alerts))
+    save_state(current)
 
 
 if __name__ == "__main__":
