@@ -14,8 +14,14 @@ def get_stock():
     headers = {
         "User-Agent": "Mozilla/5.0 (compatible; DMITStockMonitor/1.0)"
     }
-    response = requests.get(URL, headers=headers, timeout=25)
-    response.raise_for_status()
+response = requests.get(URL, headers=headers, timeout=25)
+
+if response.status_code == 403:
+    print("监控暂停：DMITStock 拒绝了 GitHub Actions 的访问。")
+    print("没有获取到库存数据，本次不更新历史库存。")
+    return None
+
+response.raise_for_status()
 
     soup = BeautifulSoup(response.text, "html.parser")
     rows = soup.find_all(["tr", "article", "li"])
@@ -87,6 +93,9 @@ def send_wechat(title, content):
 
 def main():
     current = get_stock()
+
+if current is None:
+    return
 
     old = {}
     if STATE_FILE.exists():
